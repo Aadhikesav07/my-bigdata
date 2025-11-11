@@ -1,154 +1,110 @@
 import os
-import sys
-import textwrap
-
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, lower, regexp_replace
-
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import textwrap
+import re
 
-# ---------------- Spark session (portable) ----------------
-spark = (
-    SparkSession.builder
-    .appName("Twitter Sentiment Analysis")
-    .master("local[*]")   # run locally in Codespaces/Actions
-    .getOrCreate()
-)
-
-# ---------------- Data load ----------------
-SRC = "dataset/twitter_sentiment.csv"
+SRC = "dataset/data.csv"
 OUT_DIR = "dataset"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-df = spark.read.csv(SRC, header=True, inferSchema=True)
+df = pd.read_csv(SRC)
 
-# ---------------- Cleaning ----------------
-# 1) drop URLs, mentions, hashtags; 2) lowercase; 3) keep letters and spaces; 4) collapse spaces
-df_clean = df.withColumn(
-    "clean_text",
-    lower(
-        regexp_replace(
-            regexp_replace(
-                regexp_replace(col("text"), r"http\\S+", ""),
-                r"@[A-Za-z0-9_]+", ""
-            ),
-            r"#[A-Za-z0-9_]+", ""
-        )
-    )
-)
-df_clean = df_clean.withColumn("clean_text", regexp_replace(col("clean_text"), r"[^a-zA-Z\\s]", ""))
-df_clean = df_clean.withColumn("clean_text", regexp_replace(col("clean_text"), r"\\s+", " "))
+def clean_text(text):
+    if pd.isna(text):
+        return ""
+    text = re.sub(r'http\S+', '', str(text))
+    text = re.sub(r'\[.*?\]\(.*?\)', '', text)
+    text = text.lower()
+    text = re.sub(r'[^a-zA-Z\s]', '', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
-# ---------------- Plot style helpers ----------------
+if 'selftext' in df.columns:
+    df['clean_selftext'] = df['selftext'].apply(clean_text)
+if 'title' in df.columns:
+    df['clean_title'] = df['title'].apply(clean_text)
+
 sns.set_theme(style="whitegrid", context="talk")
 
-def _save_fig(path, fig=None, dpi=180):
+def save_fig(path, fig=None, dpi=180):
     if fig is None:
         fig = plt.gcf()
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
 
-def _wrap(labels, width=18):
+def wrap_labels(labels, width=18):
     return [textwrap.fill(str(x), width=width) for x in labels]
 
-# ---------------- 1) Sentiment distribution ----------------
-# Fix order and annotate bars; prevent overlapping by constrained layout
-sentiment_counts = (
-    df_clean.groupBy("airline_sentiment").count()
-)
-
-sentiment_pd = sentiment_counts.toPandas()
-# Standardize sentiment order if present
-order = [s for s in ["positive", "negative", "neutral"] if s in sentiment_pd["airline_sentiment"].unique()]
-if not order:
-    order = sentiment_pd.sort_values("count", ascending=False)["airline_sentiment"].tolist()
-
-fig, ax = plt.subplots(figsize=(7.5, 4.5), constrained_layout=True)
-sns.barplot(x="airline_sentiment", y="count", data=sentiment_pd, order=order, palette="pastel", ax=ax)
-ax.set_xlabel("Sentiment")
-ax.set_ylabel("Number of tweets")
-ax.set_title("Overall Sentiment Distribution", pad=10)
-
-# Annotate bars
-for c in ax.containers:
-    ax.bar_label(c, fmt="%d", padding=3)
-
-_save_fig(os.path.join(OUT_DIR, "sentiment_distribution.png"), fig)
-
-# ---------------- 2) Sentiment by airline (stacked) ----------------
-# Limit to top N airlines to avoid overcrowding; wrap and rotate x ticks; external legend
-TOP_AIRLINES = 8
-airline_sent = df_clean.groupBy("airline", "airline_sentiment").count()
-airline_sent_pd = airline_sent.toPandas()
-
-if not airline_sent_pd.empty:
-    # Select top airlines by total volume
-    tot = airline_sent_pd.groupby("airline", as_index=False)["count"].sum().sort_values("count", ascending=False)
-    top_air = tot.head(TOP_AIRLINES)["airline"].tolist()
-    subset = airline_sent_pd[airline_sent_pd["airline"].isin(top_air)].copy()
-
-    # Pivot to stacked bars with a consistent sentiment column order where possible
-    cols = [c for c in ["positive", "negative", "neutral"] if c in subset["airline_sentiment"].unique()]
-    pivot = (
-        subset.pivot(index="airline", columns="airline_sentiment", values="count")
-        .fillna(0)
-        .reindex(columns=cols)
-        .loc[top_air]
-    )
-
-    fig, ax = plt.subplots(figsize=(9.5, 5.2), constrained_layout=True)
-    pivot.plot(kind="bar", stacked=True, ax=ax, color=sns.color_palette("husl", len(pivot.columns)))
-    ax.set_xlabel("Airline")
-    ax.set_ylabel("Tweet count")
-    ax.set_title("Sentiment by Airline (Top {})".format(TOP_AIRLINES), pad=10)
-
-    # Wrap and tilt airline names
-    ax.set_xticklabels(_wrap(pivot.index, 14), rotation=15, ha="right")
-
-    # Put legend outside to avoid overlap
-    ax.legend(title="Sentiment", bbox_to_anchor=(1.02, 1), loc="upper left", borderaxespad=0)
-
-    _save_fig(os.path.join(OUT_DIR, "airline_sentiment.png"), fig)
-
-# ---------------- 3) Negative reason analysis ----------------
-# Use horizontal bars with wrapped labels to avoid x‑axis collisions
-TOP_REASONS = 12
-neg_reason = df_clean.groupBy("negativereason").count()
-neg_reason_pd = (
-    neg_reason.toPandas()
-    .dropna(subset=["negativereason"])
-    .sort_values("count", ascending=False)
-    .head(TOP_REASONS)
-)
-
-if not neg_reason_pd.empty:
-    fig, ax = plt.subplots(figsize=(9.5, 5.5), constrained_layout=True)
-    # Wrap reason labels for y ticks
-    y_labels = _wrap(neg_reason_pd["negativereason"].tolist(), width=28)
-    sns.barplot(x="count", y=y_labels, data=neg_reason_pd.assign(negativereason_wrapped=y_labels),
-                orient="h", palette=sns.color_palette("crest", n_colors=len(neg_reason_pd)), ax=ax)
-
-    ax.set_xlabel("Number of tweets")
-    ax.set_ylabel("Negative reason")
-    ax.set_title("Top Negative Reasons", pad=10)
-
-    # Annotate on the bars
+# 1. Flair distribution - FIX: Added hue parameter
+if "link_flair_text" in df.columns:
+    flair_counts = df["link_flair_text"].value_counts().reset_index()
+    flair_counts.columns = ["Flair", "Count"]
+    
+    fig, ax = plt.subplots(figsize=(7.5, 4.5), constrained_layout=True)
+    sns.barplot(x="Flair", y="Count", hue="Flair", data=flair_counts, ax=ax, palette="pastel", legend=False)
+    ax.set_xlabel("Flair")
+    ax.set_ylabel("Number of posts")
+    ax.set_title("Distribution of Post Flair", pad=10)
+    
+    # FIX: Set ticks before labels
+    ax.set_xticks(range(len(flair_counts)))
+    ax.set_xticklabels(wrap_labels(flair_counts["Flair"].tolist(), 12), rotation=15, ha="right")
+    
     for c in ax.containers:
         ax.bar_label(c, fmt="%d", padding=3)
+    
+    save_fig(os.path.join(OUT_DIR, "flair_distribution.png"), fig)
 
-    _save_fig(os.path.join(OUT_DIR, "neg_reason_distribution.png"), fig)
+# 2. Average upvotes by flair
+if "link_flair_text" in df.columns and "ups" in df.columns:
+    avg_upvotes = df.groupby("link_flair_text")["ups"].mean().sort_values(ascending=False).reset_index()
+    avg_upvotes.columns = ["Flair", "Average Upvotes"]
+    
+    fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
+    sns.barplot(x="Flair", y="Average Upvotes", hue="Flair", data=avg_upvotes, ax=ax, legend=False)
+    ax.set_xlabel("Flair")
+    ax.set_ylabel("Average Upvotes")
+    ax.set_title("Average Upvotes by Post Flair", pad=10)
+    
+    # FIX: Set ticks before labels
+    ax.set_xticks(range(len(avg_upvotes)))
+    ax.set_xticklabels(wrap_labels(avg_upvotes["Flair"].tolist(), 12), rotation=15, ha="right")
+    
+    for c in ax.containers:
+        ax.bar_label(c, fmt="%.1f", padding=3)
+    
+    save_fig(os.path.join(OUT_DIR, "flair_avg_ups.png"), fig)
 
-# ---------------- 4) Retweet stats ----------------
-# Show summary in console
-df_clean.selectExpr("max(retweet_count) as max_retweets", "avg(retweet_count) as avg_retweets").show()
+# 3. Posts by weekday - FIX: Added hue parameter
+if "weekday" in df.columns:
+    weekday_counts = df["weekday"].value_counts().reset_index()
+    weekday_counts.columns = ["Weekday", "Count"]
+    
+    fig, ax = plt.subplots(figsize=(7, 4), constrained_layout=True)
+    sns.barplot(x="Weekday", y="Count", hue="Weekday", data=weekday_counts, ax=ax, palette="mako", legend=False)
+    ax.set_xlabel("Weekday")
+    ax.set_ylabel("Number of posts")
+    ax.set_title("Posts by Weekday", pad=10)
+    
+    for c in ax.containers:
+        ax.bar_label(c, fmt="%d", padding=3)
+    
+    save_fig(os.path.join(OUT_DIR, "posts_by_weekday.png"), fig)
 
-# ---------------- 5) Export cleaned data ----------------
-# If the dataset is very large, consider writing via Spark to a single CSV with coalesce(1)
-# Here we assume modest size and export via pandas for a single-file output
-clean_pd_cols = [c for c in df_clean.columns if c in {"tweet_id", "airline", "airline_sentiment", "negativereason", "clean_text", "retweet_count"}]
-clean_pd = df_clean.select(*clean_pd_cols).toPandas()
-clean_pd.to_csv(os.path.join(OUT_DIR, "twitter_sentiment_clean.csv"), index=False)
+# 4. Upvote ratio statistics
+if "upvote_ratio" in df.columns:
+    print(f"\nUpvote Ratio Statistics:")
+    print(f"Maximum: {df['upvote_ratio'].max():.2f}")
+    print(f"Average: {df['upvote_ratio'].mean():.2f}")
+    print(f"Minimum: {df['upvote_ratio'].min():.2f}")
 
-print("All analyses and visualizations saved in 'dataset/' folder. Check PNG files and CSV for details.")
+# 5. Export cleaned dataset
+clean_cols = [c for c in df.columns if c in {"selftext", "title", "clean_selftext", "clean_title", 
+                                               "link_flair_text", "ups", "upvote_ratio", 
+                                               "num_comments", "weekday", "author", "created"}]
+df[clean_cols].to_csv(os.path.join(OUT_DIR, "reddit_posts_clean.csv"), index=False)
+
+print("\nAll analyses and visualizations saved in 'dataset/' folder.")
+print("Check PNG files and reddit_posts_clean.csv for details.")
