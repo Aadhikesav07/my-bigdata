@@ -1,22 +1,14 @@
 import streamlit as st
 import pandas as pd
-import seaborn as sns
+import plotly.express as px
 import matplotlib.pyplot as plt
-import textwrap
+from wordcloud import WordCloud, STOPWORDS
+from textblob import TextBlob
+from sklearn.feature_extraction.text import CountVectorizer
+import seaborn as sns
+import numpy as np
 
-# Page config
-st.set_page_config(page_title="📱 Reddit Analysis", layout="wide", initial_sidebar_state="expanded")
-
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .main { padding-top: 2rem; }
-    .stMetric { background-color: #f0f2f6; padding: 1rem; border-radius: 0.5rem; }
-    h1 { color: #1f77b4; }
-    h2 { color: #2c3e50; margin-top: 2rem; }
-    .stPlotlyChart { border: 1px solid #e0e0e0; border-radius: 0.5rem; padding: 1rem; background: white; }
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="📱 Reddit Analysis", layout="wide")
 
 # Data loading
 DATA_PATH = "dataset/reddit_posts_clean.csv"
@@ -28,215 +20,152 @@ def load_data():
 
 df = load_data()
 
-# Sidebar filters
-st.sidebar.header("🎛️ Filter by Flair")
-st.sidebar.markdown("Select Flair(s)")
-
-if "link_flair_text" in df.columns:
-    all_flairs = sorted(df["link_flair_text"].dropna().unique().tolist())
-    selected_flairs = st.sidebar.multiselect(
-        "Choose flairs to filter:",
-        options=all_flairs,
-        default=[],
-        help="Select one or more flairs to filter the data"
-    )
-    
-    # Apply filter
-    if selected_flairs:
-        df_filtered = df[df["link_flair_text"].isin(selected_flairs)].copy()
-    else:
-        df_filtered = df.copy()
-else:
-    df_filtered = df.copy()
+def apply_filters(df):
+    st.sidebar.header("🎛️ Filter by Flair")
+    flairs = sorted(df["link_flair_text"].dropna().unique()) if "link_flair_text" in df else []
+    filtered = df
     selected_flairs = []
+    if flairs:
+        selected_flairs = st.sidebar.multiselect(
+            "Choose flairs to filter:", 
+            options=flairs,
+            help="Select one or more flairs to filter the data",
+            default=[]
+        )
+        if selected_flairs:
+            filtered = filtered[filtered["link_flair_text"].isin(selected_flairs)]
+    st.sidebar.info(f"Showing {len(filtered):,} of {len(df):,} posts")
+    if selected_flairs and st.sidebar.button("🔄 Clear Filters"):
+        st.session_state["clear"] = True
+    return filtered
 
-# Display filter status
-if selected_flairs:
-    st.sidebar.success(f"✓ Filtering by: {', '.join(selected_flairs)}")
-    st.sidebar.info(f"Showing {len(df_filtered):,} of {len(df):,} posts")
-else:
-    st.sidebar.info(f"Showing all {len(df):,} posts")
-
-# Clear filters button
-if selected_flairs and st.sidebar.button("🔄 Clear Filters"):
+if "clear" in st.session_state:
+    st.session_state.pop("clear")
     st.experimental_rerun()
 
-# Main header
-st.title("📱 Reddit Submissions Analysis Dashboard")
-st.markdown("---")
+df_filtered = apply_filters(df)
 
-# KPI metrics
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.metric("📊 Total Posts", f"{len(df_filtered):,}")
-
-with col2:
-    if "upvote_ratio" in df_filtered.columns:
-        avg_ratio = df_filtered["upvote_ratio"].mean()
-        st.metric("⬆️ Avg Upvote Ratio", f"{avg_ratio:.2f}")
-    else:
-        st.metric("⬆️ Avg Upvote Ratio", "N/A")
-
-with col3:
-    if "link_flair_text" in df_filtered.columns:
-        unique_flairs = df_filtered["link_flair_text"].nunique()
-        st.metric("🏷️ Unique Flairs", f"{unique_flairs}")
-    else:
-        st.metric("🏷️ Unique Flairs", "N/A")
+# -------------------------------------------
+# KPI Metrics
+# -------------------------------------------
+cols = st.columns(4)
+with cols[0]:
+    st.metric("Total Posts", f"{len(df_filtered):,}")
+with cols[1]:
+    st.metric("Avg Upvote Ratio", 
+              f"{df_filtered['upvote_ratio'].mean():.2f}" if "upvote_ratio" in df_filtered else "N/A")
+with cols[2]:
+    st.metric("Unique Flairs", 
+              df_filtered["link_flair_text"].nunique() if "link_flair_text" in df_filtered else "N/A")
+with cols[3]:
+    st.metric("Max Upvotes", 
+              int(df_filtered["ups"].max()) if "ups" in df_filtered else "N/A")
 
 st.markdown("---")
 
-# Visualization functions
-def wrap_labels(labels, width=15):
-    """Wrap long labels for better display"""
-    return [textwrap.fill(str(l), width=width) for l in labels]
-
-# 1. Distribution of Post Flair
-if "link_flair_text" in df_filtered.columns:
-    st.header("📊 Distribution of Post Flair")
-    
-    flair_counts = df_filtered["link_flair_text"].value_counts().head(20).reset_index()
+# -------------------------------------------
+# Flair Distribution Pie Chart
+# -------------------------------------------
+if "link_flair_text" in df_filtered:
+    flair_counts = df_filtered["link_flair_text"].value_counts().reset_index()
     flair_counts.columns = ["Flair", "Count"]
-    
-    fig1, ax1 = plt.subplots(figsize=(12, 6))
-    colors = sns.color_palette("husl", len(flair_counts))
-    bars = ax1.bar(range(len(flair_counts)), flair_counts["Count"], color=colors)
-    
-    ax1.set_xlabel("Flair", fontsize=12, fontweight='bold')
-    ax1.set_ylabel("Count", fontsize=12, fontweight='bold')
-    ax1.set_title("Distribution of Post Flair", fontsize=14, fontweight='bold', pad=20)
-    
-    # Set x-ticks
-    ax1.set_xticks(range(len(flair_counts)))
-    ax1.set_xticklabels(wrap_labels(flair_counts["Flair"].tolist(), 15), rotation=45, ha="right")
-    
-    # Add value labels on bars
-    for bar in bars:
-        height = bar.get_height()
-        ax1.text(bar.get_x() + bar.get_width()/2., height,
-                f'{int(height)}',
-                ha='center', va='bottom', fontsize=9)
-    
-    plt.tight_layout()
-    st.pyplot(fig1)
-    plt.close()
+    fig = px.pie(flair_counts, values="Count", names="Flair", title="Flair Distribution")
+    fig.update_traces(textinfo='value+label')
+    st.plotly_chart(fig, use_container_width=True)
 
-st.markdown("---")
+# -------------------------------------------
+# Most Common Words (NLP)
+# -------------------------------------------
+st.subheader("📝 Most Common Words in Titles (NLP)")
 
-# 2. Average Upvotes by Post Flair
-if "link_flair_text" in df_filtered.columns and "ups" in df_filtered.columns:
-    st.header("⬆️ Average Upvotes by Post Flair")
-    
-    avg_upvotes = df_filtered.groupby("link_flair_text")["ups"].mean().sort_values(ascending=False).head(20).reset_index()
-    avg_upvotes.columns = ["Flair", "Average Ups"]
-    
-    fig2, ax2 = plt.subplots(figsize=(12, 6))
-    colors = sns.color_palette("viridis", len(avg_upvotes))
-    bars = ax2.bar(range(len(avg_upvotes)), avg_upvotes["Average Ups"], color=colors)
-    
-    ax2.set_xlabel("Flair", fontsize=12, fontweight='bold')
-    ax2.set_ylabel("Average Ups", fontsize=12, fontweight='bold')
-    ax2.set_title("Average Upvotes by Post Flair", fontsize=14, fontweight='bold', pad=20)
-    
-    ax2.set_xticks(range(len(avg_upvotes)))
-    ax2.set_xticklabels(wrap_labels(avg_upvotes["Flair"].tolist(), 15), rotation=45, ha="right")
-    
-    for bar in bars:
-        height = bar.get_height()
-        ax2.text(bar.get_x() + bar.get_width()/2., height,
-                f'{height:.1f}',
-                ha='center', va='bottom', fontsize=9)
-    
-    plt.tight_layout()
-    st.pyplot(fig2)
-    plt.close()
+def get_top_words(texts, n=15):
+    cv = CountVectorizer(stop_words="english", max_features=n)
+    counts = cv.fit_transform(texts.dropna())
+    word_freq = dict(zip(cv.get_feature_names_out(), counts.sum(axis=0).A1))
+    return word_freq
 
-st.markdown("---")
+words = get_top_words(df_filtered['title'] if 'title' in df_filtered else pd.Series([]), 15)
+word_freq_df = pd.DataFrame.from_dict(words, orient='index').reset_index()
+word_freq_df.columns = ["Word", "Frequency"]
+fig = px.bar(word_freq_df, x="Word", y="Frequency", title="Top Words in Titles", color="Frequency", color_continuous_scale="viridis")
+st.plotly_chart(fig, use_container_width=True)
 
-# 3. Posts by Weekday
-if "weekday" in df_filtered.columns:
-    st.header("📅 Posts by Weekday")
-    
-    # Define weekday order
+# -------------------------------------------
+# Word Cloud
+# -------------------------------------------
+st.subheader("☁️ Word Cloud of Post Titles")
+text = " ".join(t for t in df_filtered['title'].dropna().astype(str))
+stopwords = set(STOPWORDS)
+wordcloud = WordCloud(stopwords=stopwords, background_color="white", width=800, height=300, colormap='plasma').generate(text)
+fig, ax = plt.subplots(figsize=(10, 3))
+ax.imshow(wordcloud, interpolation="bilinear")
+ax.axis("off")
+st.pyplot(fig)
+plt.close(fig)
+
+# -------------------------------------------
+# Sentiment Analysis
+# -------------------------------------------
+st.subheader("😊 Sentiment Analysis (TextBlob Polarity)")
+
+def calc_sentiment(txt):
+    try:
+        return TextBlob(txt).sentiment.polarity
+    except Exception:
+        return 0.0
+
+if 'title' in df_filtered:
+    df_filtered['sentiment'] = df_filtered['title'].fillna("").apply(calc_sentiment)
+    sentiment_fig = px.histogram(df_filtered, x="sentiment", nbins=25,
+                                 title="Sentiment Polarity of Titles",
+                                 color_discrete_sequence=["teal"])
+    st.plotly_chart(sentiment_fig, use_container_width=True)
+
+    pol_mean = df_filtered["sentiment"].mean()
+    if pol_mean > 0.1:
+        st.success(f"Overall Positive Sentiment (avg polarity: **{pol_mean:.2f}**)")
+    elif pol_mean < -0.1:
+        st.error(f"Overall Negative Sentiment (avg polarity: **{pol_mean:.2f}**)")
+    else:
+        st.info(f"Overall Neutral Sentiment (avg polarity: **{pol_mean:.2f}**)")
+
+# -------------------------------------------
+# Comment Count Distribution
+# -------------------------------------------
+if "num_comments" in df_filtered:
+    st.subheader("💬 Comment Count Distribution")
+    fig = px.histogram(df_filtered, x="num_comments", nbins=25, color_discrete_sequence=["#FF7F0E"])
+    st.plotly_chart(fig, use_container_width=True)
+
+# -------------------------------------------
+# Upvote Analysis by Weekday
+# -------------------------------------------
+if "weekday" in df_filtered and "ups" in df_filtered:
+    st.subheader("📅 Upvotes by Weekday")
     weekday_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    
-    weekday_counts = df_filtered["weekday"].value_counts().reindex(weekday_order, fill_value=0).reset_index()
-    weekday_counts.columns = ["Weekday", "Count"]
-    
-    fig3, ax3 = plt.subplots(figsize=(12, 6))
-    colors = sns.color_palette("coolwarm", len(weekday_counts))
-    bars = ax3.bar(weekday_counts["Weekday"], weekday_counts["Count"], color=colors)
-    
-    ax3.set_xlabel("Weekday", fontsize=12, fontweight='bold')
-    ax3.set_ylabel("Count", fontsize=12, fontweight='bold')
-    ax3.set_title("Posts by Weekday", fontsize=14, fontweight='bold', pad=20)
-    ax3.tick_params(axis='x', rotation=0)
-    
-    for bar in bars:
-        height = bar.get_height()
-        ax3.text(bar.get_x() + bar.get_width()/2., height,
-                f'{int(height)}',
-                ha='center', va='bottom', fontsize=10)
-    
-    plt.tight_layout()
-    st.pyplot(fig3)
-    plt.close()
+    temp_df = df_filtered.groupby("weekday")["ups"].mean().reindex(weekday_order).reset_index()
+    fig = px.bar(temp_df, x="weekday", y="ups", title="Average Upvotes per Weekday", color="ups", color_continuous_scale="blues")
+    st.plotly_chart(fig, use_container_width=True)
 
-st.markdown("---")
-
-# 4. Upvote Ratio Statistics
-if "upvote_ratio" in df_filtered.columns:
-    st.header("📈 Upvote Ratio Statistics")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        max_ratio = df_filtered["upvote_ratio"].max()
-        st.metric("Maximum Upvote Ratio", f"{max_ratio:.2f}")
-    
-    with col2:
-        avg_ratio = df_filtered["upvote_ratio"].mean()
-        st.metric("Average Upvote Ratio", f"{avg_ratio:.2f}")
-    
-    with col3:
-        min_ratio = df_filtered["upvote_ratio"].min()
-        st.metric("Minimum Upvote Ratio", f"{min_ratio:.2f}")
-
-st.markdown("---")
-
-# 5. Data Table with filters
-st.header("📋 Filtered Data")
-
-# Column selector
-if st.checkbox("Show data table"):
-    available_cols = df_filtered.columns.tolist()
-    default_cols = [c for c in ["title", "link_flair_text", "ups", "upvote_ratio", "num_comments", "weekday"] if c in available_cols]
-    
-    selected_cols = st.multiselect(
-        "Select columns to display:",
-        options=available_cols,
-        default=default_cols[:6] if default_cols else available_cols[:6]
+# -------------------------------------------
+# Data Table with Filters and Download
+# -------------------------------------------
+st.header("📋 Data Preview")
+if st.checkbox("Show data table (with filter)"):
+    tbl_cols = st.multiselect(
+        "Columns to display:",
+        df_filtered.columns.tolist(),
+        default=["title", "link_flair_text", "ups", "upvote_ratio", "num_comments", "weekday"] if "link_flair_text" in df_filtered else df_filtered.columns.tolist()[:6]
     )
-    
-    if selected_cols:
-        # Number of rows to display
-        num_rows = st.slider("Number of rows to display:", 10, 100, 50, 10)
-        st.dataframe(df_filtered[selected_cols].head(num_rows), use_container_width=True)
-        
-        # Download button
-        csv = df_filtered[selected_cols].to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download filtered data as CSV",
-            data=csv,
-            file_name="reddit_filtered_data.csv",
-            mime="text/csv"
-        )
+    tbl_len = st.slider("Rows to show:", 10, 100, 30, step=10)
+    st.dataframe(df_filtered[tbl_cols].head(tbl_len), use_container_width=True)
+    csv = df_filtered[tbl_cols].to_csv(index=False).encode('utf-8')
+    st.download_button("⬇️ Download CSV", csv, "filtered_reddit_data.csv", "text/csv")
 
 # Footer
 st.markdown("---")
 st.markdown("""
-<div style='text-align: center; color: #888; padding: 2rem;'>
-    <p>📱 Reddit Submissions Analysis Dashboard | Built with Streamlit</p>
-</div>
+<p style='text-align: center; color: var(--text-color); opacity: 0.7;'>
+    📱 <b>Reddit Submissions Analysis Dashboard | Built with Streamlit, Plotly, and NLP</b>
+</p>
 """, unsafe_allow_html=True)
